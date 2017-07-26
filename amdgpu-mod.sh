@@ -46,53 +46,80 @@ function produce_patch {
 TPL=$(cat <<EOF
 --- ./polaris10_smc.c.orig	2017-04-27 12:00:59.492580016 +0300
 +++ polaris10_smc.c		2017-04-27 15:27:55.451783666 +0300
-@@ -112,10 +112,15 @@
+@@ -112,10 +112,17 @@
  			else if (dep_table->entries[i].mvdd)
  				*mvdd = (uint32_t) dep_table->entries[i].mvdd *
  					VOLTAGE_SCALE;
  
  			*voltage |= 1 << PHASES_SHIFT;
 +			//MOD UNDERVOLT
++			printk(KERN_ALERT "[$0] Old voltage: %d\n", *voltage);
 +			//UVT_V*voltage = (*voltage & 0xFFFF0000) + (({uvolt}*VOLTAGE_SCALE) & 0xFFFF);
 +			//WARNING {uvolt} here must be in (uvolt > 0 && uvolt <= 100)
 +			//UVT_P*voltage -= (((*voltage & 0xFFFF) * {uvolt}) / 100) & 0xFFFF;
++			printk(KERN_ALERT "[$0] New voltage: %d\n", *voltage);
 +			//END UNDRVOLT
  			return 0;
  		}
  	}
  
  	/* sclk is bigger than max sclk in the dependence table */
-@@ -134,10 +139,15 @@
+@@ -134,10 +141,17 @@
  	if (SMU7_VOLTAGE_CONTROL_NONE == data->mvdd_control)
  		*mvdd = data->vbios_boot_state.mvdd_bootup_value * VOLTAGE_SCALE;
  	else if (dep_table->entries[i].mvdd)
  		*mvdd = (uint32_t) dep_table->entries[i - 1].mvdd * VOLTAGE_SCALE;
  
 +	//MOD UNDERVOLT
++	printk(KERN_ALERT "[$0] 2nd old voltage: %d\n", *voltage);
 +	//UVT_V*voltage = (*voltage & 0xFFFF0000) + (({uvolt}*VOLTAGE_SCALE) & 0xFFFF);
 +	//WARNING {uvolt} here must be in (uvolt > 0 && uvolt <= 100)
 +	//UVT_P*voltage -= (((*voltage & 0xFFFF) * {uvolt}) / 100) & 0xFFFF;
++	printk(KERN_ALERT "[$0] 2nd new voltage: %d\n", *voltage);
 +	//END UNDRVOLT
  	return 0;
  }
  
  static uint16_t scale_fan_gain_settings(uint16_t raw_setting)
  {
-@@ -770,10 +780,14 @@
+@@ -774,10 +788,18 @@
  
  	polaris10_get_sclk_range_table(hwmgr, &(smu_data->smc_state_table));
  
  	for (i = 0; i < dpm_table->sclk_table.count; i++) {
  
 +		//MOD UNDERCLOCK
-+		int clk = dpm_table->sclk_table.dpm_levels[i].value;
-+		dpm_table->sclk_table.dpm_levels[i].value -= (clk * {uclock}) / 100;
++		if (i > 0) {
++			printk(KERN_ALERT "[$0] Old clock for DPM state %d : %d\n", i, dpm_table->sclk_table.dpm_levels[i].value);
++			int clk = dpm_table->sclk_table.dpm_levels[i].value;
++			dpm_table->sclk_table.dpm_levels[i].value -= (clk * {uclock}) / 100;
++			printk(KERN_ALERT "[$0] New clock for DPM state %d : %d\n", i, dpm_table->sclk_table.dpm_levels[i].value);
++		}
 +		//END UNDERCLOCK
  		result = polaris10_populate_single_graphic_level(hwmgr,
  				dpm_table->sclk_table.dpm_levels[i].value,
  				(uint16_t)smu_data->activity_target[i],
  				&(smu_data->smc_state_table.GraphicsLevel[i]));
  		if (result)
+@@ -916,10 +938,18 @@
+ 
+ 	for (i = 0; i < dpm_table->mclk_table.count; i++) {
+ 		PP_ASSERT_WITH_CODE((0 != dpm_table->mclk_table.dpm_levels[i].value),
+ 				"can not populate memory level as memory clock is zero",
+ 				return -EINVAL);
++               //MOD MEMORY OVERCLOCK
++               if (i == dpm_table->mclk_table.count - 1) {
++                       printk(KERN_ALERT "[$0] Old memory clock for mem state %d : %d\n", i, dpm_table->mclk_table.dpm_levels[i].value);
++                       int temp_mclk = dpm_table->mclk_table.dpm_levels[i].value;
++                       dpm_table->mclk_table.dpm_levels[i].value += ({mclk} * temp_mclk) / 100;
++                       printk(KERN_ALERT "[$0] New memory clock for mem state %d : %d\n", i, dpm_table->mclk_table.dpm_levels[i].value);
++               }
++               //END MEMORY OVERCLOCK
+ 		result = polaris10_populate_single_memory_level(hwmgr,
+ 				dpm_table->mclk_table.dpm_levels[i].value,
+ 				&levels[i]);
+ 		if (i == dpm_table->mclk_table.count - 1) {
+ 			levels[i].DisplayWatermark = PPSMC_DISPLAY_WATERMARK_HIGH;
 EOF
 )
     PATCH=${TPL//"{uvolt}"/$1}
@@ -101,7 +128,8 @@ EOF
     else
 	PATCH=${PATCH//"//UVT_P"/""}
     fi
-    echo "${PATCH//"{uclock}"/$2}"
+    PATCH=${PATCH//"{uclock}"/$2}
+    echo "${PATCH//"{mclk}"/$3}"
 }
 
 
@@ -116,6 +144,7 @@ function show_help {
     echo "    -d DIRECTORY           : Path to directory with your amdgpu driver files"
     echo "    -v VOLTAGE or PERCENT  : Base voltage in mV as int or downvolt in percents if value from 0 to 100"
     echo "    -c PERCENT             : Underclock value in percents"
+    echo "    -m PERCENT             : Memory OVERclock value in percents"
 }
 
 
@@ -126,14 +155,16 @@ RESTORE=0
 AMDGPUDIR=""
 UVOLT=0 #818 in example
 UCLOCK=0 #0.87 in example
+MCLK=0
 
-while getopts "h?rd:v:c:" opt; do
+while getopts "h?rd:v:c:m:" opt; do
     case "$opt" in
 	h|\?) logo; show_help; exit 0 ;;
 	d) AMDGPUDIR=$OPTARG; HELP=0 ;;
 	r) RESTORE=1; HELP=0 ;;
 	v) UVOLT=$((${OPTARG//[!0-9]/})) ;;
 	c) UCLOCK=$((${OPTARG//[!0-9]/})) ;;
+	m) MCLK=$((${OPTARG//[!0-9]/})) ;;
     esac
 done
 
@@ -172,7 +203,9 @@ if [[ $RESTORE -eq 0 ]]; then
 	
     if [[ $UCLOCK -lt 0 || $UCLOCK -gt 50 ]]; then error "Can not allow you set underclock to ${UCLOCK}% !"; HELP=1; fi
     
-    info "Undervolt value ${UVOLT}${USUF} underclock is ${UCLOCK}%"
+    if [[ $MCLK -lt 0 || $MCLK -gt 50 ]]; then error "Can not allow you set mem overclock to ${MCLK}% !"; HELP=1; fi
+
+    info "Undervolt value ${UVOLT}${USUF} underclock is ${UCLOCK}% Memory overclock is ${MCLK}%"
 else
     info "Restore configuration requested"
 fi
@@ -216,7 +249,7 @@ fi
 #PATCH MODE
 KERNEL=`uname -r`
 
-KOFILE_PTCH="${APPDIR}/amdgpu.ko_${KERNEL}_${UVOLT}_${UCLOCK}"
+KOFILE_PTCH="${APPDIR}/amdgpu.ko_${KERNEL}_v-${UVOLT}_c-${UCLOCK}_m-${MCLK}"
 if [[ $RESTORE -eq 1 ]]; then
     KOFILE_PTCH="${APPDIR}/amdgpu.ko_${KERNEL}_orig"
 fi
@@ -228,7 +261,7 @@ if [ ! -f $KOFILE_PTCH ]; then
     cp -f "$BACKUPFILE" "$THEFILE"
 
     if [[ $RESTORE -eq 0 ]]; then
-        PTCH=`produce_patch $UVOLT $UCLOCK`
+        PTCH=`produce_patch $UVOLT $UCLOCK $MCLK`
         echo "$PTCH" | patch "$THEFILE"
 
         if [[ $? -ne 0 ]]; then error "Patching failed with error code: $?"; exit 1; fi
