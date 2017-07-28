@@ -285,6 +285,6 @@ find "/lib/modules/$KERNEL" -name amdgpu.ko -exec rm -v {} \;
 cp -f "$KOFILE_PTCH" "/lib/modules/${KERNEL}/kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko"
 
 depmod -a
-update-initramfs -u
+update-initramfs -k ${KERNEL} -u
 
 info "Looks like everything is ok. Please reboot now"
